@@ -1,0 +1,116 @@
+WITH session_attribution AS (
+  SELECT
+    CONCAT(
+      (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'),
+      user_pseudo_id
+    ) AS session_id,
+
+    user_pseudo_id AS ga_client_id,
+
+    LOWER(collected_traffic_source.manual_source)        AS old_source,
+    LOWER(collected_traffic_source.manual_medium)        AS old_medium,
+    LOWER(collected_traffic_source.manual_campaign_name) AS campaign
+
+  FROM `enter.tablename_123456.events_*`
+  WHERE event_name = 'session_start'
+),
+
+session_performance AS (
+  SELECT
+    CONCAT(
+      (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id'),
+      user_pseudo_id
+    ) AS session_id,
+
+    user_pseudo_id AS ga_client_id,
+
+    COUNTIF(event_name = 'purchase') AS conversions,
+    SUM(ecommerce.purchase_revenue)  AS conversion_value
+
+  FROM `enter.tablename_123456.events_*`
+  GROUP BY
+    session_id,
+    ga_client_id
+),
+
+sessions AS (
+  SELECT
+    a.session_id,
+    a.ga_client_id,
+    a.old_source,
+    a.old_medium,
+    a.campaign,
+    IFNULL(p.conversions, 0)      AS conversions,
+    IFNULL(p.conversion_value, 0) AS conversion_value
+  FROM session_attribution a
+  LEFT JOIN session_performance p
+    USING (session_id, ga_client_id)
+),
+
+fin AS (
+  SELECT
+    old_source,
+    old_medium,
+    campaign,
+    session_id,
+
+    COUNT(DISTINCT session_id) AS sessions,
+    SUM(conversions)           AS conversions,
+    SUM(conversion_value)      AS conversion_value,
+
+    CASE 
+      WHEN old_source IS NULL THEN '(direct)'
+      ELSE old_source
+    END AS Source,
+
+    CASE 
+      WHEN old_medium IS NULL THEN 'none'
+      ELSE old_medium
+    END AS Medium
+
+  FROM sessions
+  GROUP BY
+    old_source,
+    old_medium,
+    campaign,
+    session_id
+)
+
+SELECT
+  old_source,
+  old_medium,
+  Source,
+  Medium,
+
+  CASE
+    WHEN Source = '(direct)' AND Medium = 'none' THEN 'Direct'
+    WHEN REGEXP_CONTAINS(Source, r'^(google|yahoo|bing)$')
+      AND REGEXP_CONTAINS(Medium, r'^organic$') THEN 'Organic Search'
+    WHEN REGEXP_CONTAINS(Source, r'^(google|bing)$')
+      AND REGEXP_CONTAINS(Medium, r'^(.*cp.*|ppc|paid.*)$') THEN 'Paid Search'
+    WHEN REGEXP_CONTAINS(Source, r'^(youtube|twitter|facebook|fb|instagram|tiktok|ig|linkedin|pinterest)$')
+      AND REGEXP_CONTAINS(Medium, r'^(paid social|paid_social|social_paid|paid-social|social-paid)$')
+      THEN 'Paid Social'
+    WHEN REGEXP_CONTAINS(Source, r'^(twitter|t.co|facebook|fb|instagram|tiktok|ig|linkedin|pinterest)$')
+      AND REGEXP_CONTAINS(Medium, r'^(referral|organic social|organic_social|social_organic|organic-social|social-organic)$')
+      THEN 'Organic Social'
+    WHEN Medium = 'display' THEN 'Display'
+    WHEN Medium = 'email' THEN 'Email'
+    WHEN Medium IN ('affiliate','affiliates') THEN 'Affiliates'
+    WHEN Medium = 'referral' THEN 'Referral'
+    ELSE '(other)'
+  END AS ChannelGrouping,
+
+  SUM(sessions)         AS sessions,
+  SUM(conversions)      AS conversions,
+  SUM(conversion_value) AS conversion_value
+
+FROM fin
+GROUP BY
+  old_source,
+  old_medium,
+  Source,
+  Medium,
+  ChannelGrouping
+ORDER BY
+  sessions DESC;
